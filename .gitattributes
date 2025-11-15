@@ -1,3 +1,5 @@
+C:/Users/sadika957/Desktop/chatbot_gitRepo/chatbot/chroma_db_nomic filter=lfs diff=lfs merge=lfs -text
+C:/Users/sadika957/Desktop/chatbot_gitRepo/chatbot/chroma_db_jsonl filter=lfs diff=lfs merge=lfs -text
 chroma_db_jsonl/* filter=lfs diff=lfs merge=lfs -text
 chroma_db_nomic/* filter=lfs diff=lfs merge=lfs -text
 chroma_db_jsonl/4b7e81cc-591e-42b1-b2d4-34e81121cc6a/data_level0.bin filter=lfs diff=lfs merge=lfs -text
