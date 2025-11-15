@@ -32,8 +32,11 @@ gemini = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, api_key
 # -----------------------------
 # 🧠 Vector DBs
 # -----------------------------
-PERSIST_DIR_1 = r"C:\Users\sadika957\Desktop\chatbot\scripts\chroma_db_nomic"
-PERSIST_DIR_2 = r"C:\Users\sadika957\Desktop\chatbot\scripts\chroma_db_jsonl"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+PERSIST_DIR_1 = os.path.join(BASE_DIR, "chroma_db_nomic")
+PERSIST_DIR_2 = os.path.join(BASE_DIR, "chroma_db_jsonl")
 
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 
