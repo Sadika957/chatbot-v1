@@ -1,16 +1,17 @@
-langchain==0.1.16
-langchain-core==0.1.52
-langchain-community==0.0.34
-langchain-google-genai==0.0.6
-google-generativeai==0.3.2
+langchain
+langchain-core
+langchain-community
+langchain-google-genai
+google-generativeai
 
-langgraph==0.0.45
-chromadb==0.4.24
-ollama==0.6.1
+langgraph
+chromadb
+ollama
 
-protobuf==4.25.3
-pydantic==1.10.12
-typing_extensions==4.12.2
+protobuf
+pydantic
+typing_extensions
 
-requests==2.32.3
-streamlit==1.51.0
+requests
+streamlit
+
