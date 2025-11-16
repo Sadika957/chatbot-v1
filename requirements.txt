@@ -15,4 +15,6 @@ typing_extensions
 requests
 streamlit
 wikipedia
+google-api-python-client>=2.100.0
+
 
