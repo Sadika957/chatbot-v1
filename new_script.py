@@ -1,222 +1,225 @@
-import streamlit as st
 import os
-import json
-import re
-from urllib.parse import quote
-from typing import TypedDict, List, Dict, Any
+import streamlit as st
 import requests
+from typing import List, Dict, Any
 
-# -------------------------------------------
-# 🔑 STREAMLIT SECRETS
-# -------------------------------------------
+# -----------------------------
+# 🔐 Load Secrets
+# -----------------------------
 GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 GOOGLE_CSE_ID = st.secrets["GOOGLE_CSE_ID"]
 
-# -------------------------------------------
-# 🤖 GEMINI LLM (DIRECT)
-# -------------------------------------------
-from google.generativeai import configure, GenerativeModel
-configure(api_key=GOOGLE_API_KEY)
-gemini_llm = GenerativeModel("gemini-2.5-flash")
+os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
-# -------------------------------------------
-# 🧠 Embeddings (Gemini)
-# -------------------------------------------
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+# -----------------------------
+# 🤖 Gemini LLM (official API)
+# -----------------------------
+import google.generativeai as genai
+genai.configure(api_key=GOOGLE_API_KEY)
+
+llm = genai.GenerativeModel("gemini-2.5-flash")
+
+# ============================================================
+# 🧠 Custom Gemini Embeddings (FULLY Compatible with Chroma)
+# ============================================================
+from google.generativeai import embed_content
+
+class GeminiEmbeddingFunction:
+    def __init__(self, model="models/text-embedding-004"):
+        self.model = model
+
+    def embed_query(self, text: str):
+        result = embed_content(model=self.model, content=text)
+        return result["embedding"]
+
+    def embed_documents(self, texts: List[str]):
+        return [self.embed_query(t) for t in texts]
+
+embeddings = GeminiEmbeddingFunction()
+
+# -----------------------------
+# 🗃 Load Chroma Vector DBs
+# -----------------------------
 from langchain_chroma import Chroma
 
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/text-embedding-004",
-    google_api_key=GOOGLE_API_KEY
-)
-
-# -------------------------------------------
-# 📂 Vector DB Paths
-# -------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PERSIST_DIR_1 = os.path.join(BASE_DIR, "chroma_db_nomic")
-PERSIST_DIR_2 = os.path.join(BASE_DIR, "chroma_db_jsonl")
+PERSIST_DIR_1 = "db1/"
+PERSIST_DIR_2 = "db2/"
 
 db1 = Chroma(persist_directory=PERSIST_DIR_1, embedding_function=embeddings)
 db2 = Chroma(persist_directory=PERSIST_DIR_2, embedding_function=embeddings)
 
-retriever1 = db1.as_retriever(search_kwargs={"k": 8})
-retriever2 = db2.as_retriever(search_kwargs={"k": 8})
+retriever1 = db1.as_retriever(search_kwargs={"k": 5})
+retriever2 = db2.as_retriever(search_kwargs={"k": 5})
 
-# -------------------------------------------
-# 🌐 Wikipedia (LangChain)
-# -------------------------------------------
-from langchain_community.utilities import WikipediaAPIWrapper
-from langchain_community.tools import WikipediaQueryRun
-
-wiki_tool = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
-
-# -------------------------------------------
-# 🌍 Custom Google Search (NO DEPRECATION)
-# -------------------------------------------
-def google_search_raw(query):
+# ============================================================
+# 🌐 Google Search (Custom API — NO LangChain)
+# ============================================================
+def google_search(query: str) -> List[Dict[str, Any]]:
     url = (
         f"https://www.googleapis.com/customsearch/v1?"
-        f"q={quote(query)}&key={GOOGLE_API_KEY}&cx={GOOGLE_CSE_ID}"
+        f"key={GOOGLE_API_KEY}&cx={GOOGLE_CSE_ID}&q={query}"
     )
     try:
-        data = requests.get(url, timeout=8).json()
-        return data.get("items", [])
+        r = requests.get(url).json()
+        return r.get("items", [])
     except:
         return []
 
-# -------------------------------------------
-# 🔧 Memory
-# -------------------------------------------
-MEMORY_FILE = "chat_memory.json"
+def format_google_results(items):
+    if not items:
+        return ""
+    out = "### 🔎 Google Search Results\n\n"
+    for it in items[:3]:
+        title = it.get("title", "")
+        snippet = it.get("snippet", "")
+        link = it.get("link", "")
+        out += f"- **{title}**\n  - {snippet}\n  - 🔗 {link}\n\n"
+    return out
 
-def load_memory():
-    if os.path.exists(MEMORY_FILE):
-        try:
-            return json.load(open(MEMORY_FILE, "r"))
-        except:
-            return []
-    return []
 
-def save_memory(mem):
-    json.dump(mem[-15:], open(MEMORY_FILE, "w"), indent=2)
+# ============================================================
+# 📚 Wikipedia Fallback
+# ============================================================
+def wikipedia_fallback(query):
+    endpoint = f"https://en.wikipedia.org/api/rest_v1/page/summary/{query.replace(' ', '_')}"
+    try:
+        r = requests.get(endpoint).json()
+        return r.get("extract", "")
+    except:
+        return ""
 
-# -------------------------------------------
-# Utility Functions
-# -------------------------------------------
-def clean_query(q: str) -> str:
-    return re.sub(r"[\n\r]+", " ", q.strip())
 
-def extractive_answer(query: str, docs: List[Any]) -> str:
+# ============================================================
+# 🔍 Utility Functions
+# ============================================================
+def clean_query(q: str):
+    return q.strip().lower()
+
+
+def extractive_answer(query, docs):
+    """Simple extractive answer from docs."""
     if not docs:
         return ""
-
-    ctx = "\n\n".join(f"[{i+1}] {d.page_content}" for i, d in enumerate(docs[:6]))
-
-    prompt = f"""
-Use ONLY the following CONTEXT to answer the question.
-Every sentence must end with a citation like [1], [2], etc.
-If context insufficient, return "NOINFO".
-
-Question: {query}
-
-CONTEXT:
-{ctx}
-"""
-
-    ans = gemini_llm.generate_content(prompt).text
-    if ans.upper().startswith("NOINFO") or len(ans) < 40:
+    text = "\n".join([d.page_content for d in docs])
+    prompt = f"Answer the question based only on the text below.\n\nTEXT:\n{text}\n\nQUESTION: {query}\nANSWER:"
+    try:
+        r = llm.generate_content(prompt)
+        return r.text
+    except:
         return ""
-    return ans
 
-# -------------------------------------------
-# 🧠 LangGraph Workflow
-# -------------------------------------------
+
+# ============================================================
+# 🧠 LangGraph Pipeline
+# ============================================================
 from langgraph.graph import StateGraph, START, END
+from typing import TypedDict
 
 class GraphState(TypedDict):
     query: str
     answer: str
     context: str
-    chat_history: List[Dict[str, str]]
 
-def db1_node(state: GraphState) -> GraphState:
+
+# DB1 Node
+def db1_node(state: GraphState):
     q = clean_query(state["query"])
     docs = retriever1.invoke(q)
     ans = extractive_answer(q, docs)
-    return {**state, "context": "db1" if ans else "", "answer": ans}
+    return {**state, "context": "db1", "answer": ans}
 
-def db2_node(state: GraphState) -> GraphState:
+
+# DB2 Node
+def db2_node(state: GraphState):
     q = clean_query(state["query"])
     docs = retriever2.invoke(q)
     ans = extractive_answer(q, docs)
-    return {**state, "context": "db2" if ans else state["context"], "answer": ans}
+    return {**state, "context": "db2", "answer": ans}
 
-def google_node(state: GraphState) -> GraphState:
+
+# Google Search Node
+def google_node(state: GraphState):
     q = clean_query(state["query"])
-    results = google_search_raw(q)
+    items = google_search(q)
+    formatted = format_google_results(items)
+    return {**state, "context": "google", "answer": formatted}
 
-    if not results:
-        return state
 
-    text = "\n\n".join(item.get("snippet", "") for item in results[:5])
-
-    prompt = f"Use the following WEB RESULTS to answer:\n\n{text}\n\nQuestion: {q}"
-    answer = gemini_llm.generate_content(prompt).text
-
-    return {**state, "answer": answer, "context": "google"}
-
-def wiki_node(state: GraphState) -> GraphState:
+# Wikipedia Node
+def wiki_node(state: GraphState):
     q = clean_query(state["query"])
-    try:
-        res = wiki_tool.run(q)
-        answer = gemini_llm.generate_content(f"Summarize: {res}").text
-        return {**state, "answer": answer, "context": "wiki"}
-    except:
-        return state
+    extract = wikipedia_fallback(q)
+    return {**state, "context": "wiki", "answer": extract}
 
-def final_node(state: GraphState) -> GraphState:
-    if not state["answer"]:
-        state["answer"] = gemini_llm.generate_content(
-            f"Answer this question: {state['query']}"
-        ).text
-    return state
 
-# -------------------------------------------
+# Decide Routing
+def router(state: GraphState):
+    q = state["query"].lower()
+    if "bee" in q or "pollinator" in q or "species" in q:
+        return "db1"
+    if "code" in q or "python" in q or "script" in q:
+        return "db2"
+    if len(q.split()) >= 3:
+        return "google"
+    return "wiki"
+
+
 # Build Graph
-# -------------------------------------------
-workflow = StateGraph(GraphState)
-workflow.add_node("db1", db1_node)
-workflow.add_node("db2", db2_node)
-workflow.add_node("google", google_node)
-workflow.add_node("wiki", wiki_node)
-workflow.add_node("final", final_node)
+graph = StateGraph(GraphState)
 
-workflow.add_edge(START, "db1")
-workflow.add_conditional_edges("db1", lambda s: bool(s["answer"]), {"true": "final", "false": "db2"})
-workflow.add_conditional_edges("db2", lambda s: bool(s["answer"]), {"true": "final", "false": "google"})
-workflow.add_conditional_edges("google", lambda s: bool(s["answer"]), {"true": "final", "false": "wiki"})
-workflow.add_edge("wiki", "final")
-workflow.add_edge("final", END)
+graph.add_node("db1", db1_node)
+graph.add_node("db2", db2_node)
+graph.add_node("google", google_node)
+graph.add_node("wiki", wiki_node)
 
-graph = workflow.compile()
+graph.set_entry_point("router")
+graph.add_node("router", router)
 
-# -------------------------------------------
+graph.add_edge("router", "db1")
+graph.add_edge("router", "db2")
+graph.add_edge("router", "google")
+graph.add_edge("router", "wiki")
+
+graph.add_edge("db1", END)
+graph.add_edge("db2", END)
+graph.add_edge("google", END)
+graph.add_edge("wiki", END)
+
+final_graph = graph.compile()
+
+
+# ============================================================
 # 🎨 Streamlit UI
-# -------------------------------------------
-st.title("🤖 Hybrid RAG Chatbot")
+# ============================================================
+st.set_page_config(page_title="Hybrid Search Chatbot", layout="wide")
 
+st.title("💬 Hybrid Chatbot (Gemini + RAG + Google Search)")
+st.write("Ask anything and the chatbot will choose the best source.")
+
+# Chat history
 if "chat" not in st.session_state:
-    st.session_state.chat = load_memory()
+    st.session_state.chat = []
 
-user_input = st.text_input("Ask anything:")
+user_input = st.text_input("Enter your question:")
 
-if st.button("Ask"):
-    if user_input.strip():
-        mem = st.session_state.chat
-
-        result = graph.invoke({
+if user_input:
+    with st.spinner("Thinking..."):
+        result = final_graph.invoke({
             "query": user_input,
             "answer": "",
-            "context": "",
-            "chat_history": mem
+            "context": ""
         })
 
-        st.write("### 🧠 Answer:")
-        st.write(result["answer"])
-        st.caption(f"Source: {result['context']}")
+    final_answer = result["answer"]
+    ctx = result["context"]
 
-        mem.append({"query": user_input, "answer": result["answer"]})
-        save_memory(mem)
-        st.session_state.chat = mem
+    st.session_state.chat.append((user_input, final_answer, ctx))
 
-st.write("---")
-st.write("### Chat History")
-for c in st.session_state.chat[-10:]:
-    st.markdown(f"**You:** {c['query']}")
-    st.markdown(f"**Bot:** {c['answer']}")
-
-
+for q, a, ctx in st.session_state.chat[::-1]:
+    st.markdown(f"### ❓ {q}")
+    st.markdown(f"**Source:** `{ctx}`")
+    st.write(a)
+    st.markdown("---")
 
 
 
