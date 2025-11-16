@@ -1,26 +1,29 @@
+# ============================================================
+# 🌟 HYBRID CHATBOT — STREAMLIT + GEMINI + CHROMA + LANGGRAPH
+# ============================================================
+
 import os
+import re
+import json
 import streamlit as st
-import requests
 from typing import List, Dict, Any
 
 # -----------------------------
-# 🔐 Load Secrets
+# 🔐 Load API Keys from Streamlit Secrets
 # -----------------------------
 GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 GOOGLE_CSE_ID = st.secrets["GOOGLE_CSE_ID"]
-
 os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
 # -----------------------------
-# 🤖 Gemini LLM (official API)
+# 🤖 Gemini LLM
 # -----------------------------
 import google.generativeai as genai
 genai.configure(api_key=GOOGLE_API_KEY)
-
 llm = genai.GenerativeModel("gemini-2.5-flash")
 
 # ============================================================
-# 🧠 Custom Gemini Embeddings (FULLY Compatible with Chroma)
+# 🧠 Custom Gemini Embeddings (Fully Compatible)
 # ============================================================
 from google.generativeai import embed_content
 
@@ -37,10 +40,10 @@ class GeminiEmbeddingFunction:
 
 embeddings = GeminiEmbeddingFunction()
 
-# -----------------------------
-# 🗃 Load Chroma Vector DBs
-# -----------------------------
-from langchain_chroma import Chroma
+# ============================================================
+# 🗂️ Chroma Vector DBs (Correct Import)
+# ============================================================
+from langchain_community.vectorstores import Chroma
 
 PERSIST_DIR_1 = "db1/"
 PERSIST_DIR_2 = "db2/"
@@ -48,69 +51,57 @@ PERSIST_DIR_2 = "db2/"
 db1 = Chroma(persist_directory=PERSIST_DIR_1, embedding_function=embeddings)
 db2 = Chroma(persist_directory=PERSIST_DIR_2, embedding_function=embeddings)
 
-retriever1 = db1.as_retriever(search_kwargs={"k": 5})
-retriever2 = db2.as_retriever(search_kwargs={"k": 5})
+retriever1 = db1.as_retriever(search_kwargs={"k": 8})
+retriever2 = db2.as_retriever(search_kwargs={"k": 8})
 
 # ============================================================
-# 🌐 Google Search (Custom API — NO LangChain)
+# 🌐 Tools: Google Search + Wikipedia
 # ============================================================
-def google_search(query: str) -> List[Dict[str, Any]]:
-    url = (
-        f"https://www.googleapis.com/customsearch/v1?"
-        f"key={GOOGLE_API_KEY}&cx={GOOGLE_CSE_ID}&q={query}"
-    )
-    try:
-        r = requests.get(url).json()
-        return r.get("items", [])
-    except:
-        return []
+from langchain_community.tools import GoogleSearchRun, WikipediaQueryRun
+from langchain_community.utilities import GoogleSearchAPIWrapper, WikipediaAPIWrapper
 
-def format_google_results(items):
-    if not items:
-        return ""
-    out = "### 🔎 Google Search Results\n\n"
-    for it in items[:3]:
-        title = it.get("title", "")
-        snippet = it.get("snippet", "")
-        link = it.get("link", "")
-        out += f"- **{title}**\n  - {snippet}\n  - 🔗 {link}\n\n"
-    return out
+google_wrapper = GoogleSearchAPIWrapper(
+    google_api_key=GOOGLE_API_KEY,
+    google_cse_id=GOOGLE_CSE_ID
+)
+google_tool = GoogleSearchRun(api_wrapper=google_wrapper)
 
+wiki_tool = WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper())
 
 # ============================================================
-# 📚 Wikipedia Fallback
+# 🧹 Utilities
 # ============================================================
-def wikipedia_fallback(query):
-    endpoint = f"https://en.wikipedia.org/api/rest_v1/page/summary/{query.replace(' ', '_')}"
-    try:
-        r = requests.get(endpoint).json()
-        return r.get("extract", "")
-    except:
-        return ""
-
-
-# ============================================================
-# 🔍 Utility Functions
-# ============================================================
-def clean_query(q: str):
-    return q.strip().lower()
-
+def clean_query(q: str) -> str:
+    return q.strip().replace("\n", " ")
 
 def extractive_answer(query, docs):
-    """Simple extractive answer from docs."""
     if not docs:
         return ""
-    text = "\n".join([d.page_content for d in docs])
-    prompt = f"Answer the question based only on the text below.\n\nTEXT:\n{text}\n\nQUESTION: {query}\nANSWER:"
-    try:
-        r = llm.generate_content(prompt)
-        return r.text
-    except:
-        return ""
+
+    context = "\n\n".join([d.page_content for d in docs])
+
+    prompt = f"""
+Answer the question strictly from the context.
+
+Question: {query}
+
+Context:
+{context}
+
+If no answer is found in context, reply "" (empty).
+"""
+
+    resp = llm.generate_content(prompt)
+    ans = resp.text.strip()
+
+    if ans.lower().startswith("according"):
+        ans = ans.split(":", 1)[-1].strip()
+
+    return ans
 
 
 # ============================================================
-# 🧠 LangGraph Pipeline
+# 🤖 LangGraph Hybrid Routing
 # ============================================================
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict
@@ -119,107 +110,168 @@ class GraphState(TypedDict):
     query: str
     answer: str
     context: str
+    justification: str
 
 
-# DB1 Node
+# ======== DB1 Node ========
 def db1_node(state: GraphState):
     q = clean_query(state["query"])
     docs = retriever1.invoke(q)
     ans = extractive_answer(q, docs)
-    return {**state, "context": "db1", "answer": ans}
 
+    return {
+        **state,
+        "context": "db1" if ans else "",
+        "answer": ans
+    }
 
-# DB2 Node
+# ======== DB2 Node ========
 def db2_node(state: GraphState):
     q = clean_query(state["query"])
     docs = retriever2.invoke(q)
     ans = extractive_answer(q, docs)
-    return {**state, "context": "db2", "answer": ans}
 
+    return {
+        **state,
+        "context": "db2" if ans else "",
+        "answer": ans
+    }
 
-# Google Search Node
-def google_node(state: GraphState):
+# ======== Web Search Node ========
+def web_node(state: GraphState):
     q = clean_query(state["query"])
-    items = google_search(q)
-    formatted = format_google_results(items)
-    return {**state, "context": "google", "answer": formatted}
 
+    try:
+        results = google_tool.run(q)
+        if isinstance(results, list):
+            text = "\n".join([json.dumps(r, indent=2) for r in results])
+        else:
+            text = str(results)
 
-# Wikipedia Node
+        prompt = f"""
+Use only the following information to answer the question.
+
+Question: {q}
+
+Search Results:
+{text}
+
+Final Answer:
+"""
+        resp = llm.generate_content(prompt)
+        output = resp.text.strip()
+
+        justify = json.dumps(results[:2], indent=2) if isinstance(results, list) else ""
+
+        return {**state, "context": "web", "answer": output, "justification": justify}
+
+    except:
+        return {**state, "context": "", "answer": ""}
+
+# ======== Wikipedia Node ========
 def wiki_node(state: GraphState):
     q = clean_query(state["query"])
-    extract = wikipedia_fallback(q)
-    return {**state, "context": "wiki", "answer": extract}
+
+    try:
+        wiki = wiki_tool.run(q)
+
+        prompt = f"""
+Use ONLY the following Wikipedia text to answer the question.
+
+Question: {q}
+
+Wikipedia Text:
+{wiki}
+
+Final Answer:
+"""
+        resp = llm.generate_content(prompt)
+        output = resp.text.strip()
+
+        return {**state, "context": "wiki", "answer": output, "justification": wiki}
+
+    except:
+        return {**state, "context": "", "answer": ""}
 
 
-# Decide Routing
+# ======== Router ========
 def router(state: GraphState):
     q = state["query"].lower()
-    if "bee" in q or "pollinator" in q or "species" in q:
+
+    if any(x in q for x in ["bee", "wasp", "pollinator", "insect"]):
         return "db1"
-    if "code" in q or "python" in q or "script" in q:
+
+    if "code" in q or "python" in q:
         return "db2"
-    if len(q.split()) >= 3:
-        return "google"
-    return "wiki"
+
+    return "web"
 
 
-# Build Graph
+# ======== Build Graph ========
 graph = StateGraph(GraphState)
 
 graph.add_node("db1", db1_node)
 graph.add_node("db2", db2_node)
-graph.add_node("google", google_node)
+graph.add_node("web", web_node)
 graph.add_node("wiki", wiki_node)
 
-graph.set_entry_point("router")
-graph.add_node("router", router)
+graph.add_conditional_edges(
+    START,
+    router,
+    {
+        "db1": "db1",
+        "db2": "db2",
+        "web": "web"
+    }
+)
 
-graph.add_edge("router", "db1")
-graph.add_edge("router", "db2")
-graph.add_edge("router", "google")
-graph.add_edge("router", "wiki")
-
-graph.add_edge("db1", END)
-graph.add_edge("db2", END)
-graph.add_edge("google", END)
+graph.add_edge("db1", "wiki")
+graph.add_edge("db2", "wiki")
+graph.add_edge("web", END)
 graph.add_edge("wiki", END)
 
-final_graph = graph.compile()
-
+graph = graph.compile()
 
 # ============================================================
 # 🎨 Streamlit UI
 # ============================================================
-st.set_page_config(page_title="Hybrid Search Chatbot", layout="wide")
 
-st.title("💬 Hybrid Chatbot (Gemini + RAG + Google Search)")
-st.write("Ask anything and the chatbot will choose the best source.")
+st.set_page_config(page_title="Hybrid Chatbot", page_icon="🤖")
 
-# Chat history
+st.title("🤖 Hybrid RAG Chatbot")
+st.write("Uses Gemini + Chroma + Web Search + Wikipedia + LangGraph")
+
 if "chat" not in st.session_state:
     st.session_state.chat = []
 
-user_input = st.text_input("Enter your question:")
+user_input = st.text_input("Ask anything:")
 
-if user_input:
-    with st.spinner("Thinking..."):
-        result = final_graph.invoke({
-            "query": user_input,
-            "answer": "",
-            "context": ""
-        })
+if user_input.strip():
+    mem = st.session_state.chat
 
-    final_answer = result["answer"]
-    ctx = result["context"]
+    result = graph.invoke({
+        "query": user_input,
+        "answer": "",
+        "context": "",
+        "justification": ""
+    })
 
-    st.session_state.chat.append((user_input, final_answer, ctx))
+    final = result["answer"]
+    source = result["context"]
+    just = result["justification"]
 
-for q, a, ctx in st.session_state.chat[::-1]:
-    st.markdown(f"### ❓ {q}")
-    st.markdown(f"**Source:** `{ctx}`")
-    st.write(a)
-    st.markdown("---")
+    st.session_state.chat.append((user_input, final, source, just))
+
+# Display Chat
+for q, a, s, j in st.session_state.chat:
+    st.markdown(f"### **You:** {q}")
+    st.markdown(f"**Answer:** {a}")
+    st.markdown(f"📌 *Source Used:* `{s}`")
+    if j:
+        st.markdown(f"<details><summary>View Source</summary><pre>{j}</pre></details>",
+            unsafe_allow_html=True)
+    st.write("---")
+
 
 
 
